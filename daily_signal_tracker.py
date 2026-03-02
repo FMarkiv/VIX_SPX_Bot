@@ -144,7 +144,7 @@ def format_message(row: pd.Series, signals: dict, distances: dict) -> str:
     """
     # Determine verdict
     if signals["buy_signal"]:
-        verdict = "🟢 GO (BUY SIGNAL)"
+        verdict = "[GO] GO (BUY SIGNAL)"
         verdict_detail = []
         if signals["scenario_1"]:
             verdict_detail.append("Scenario 1: Ratio > 1 & SPX < SMA200")
@@ -152,7 +152,7 @@ def format_message(row: pd.Series, signals: dict, distances: dict) -> str:
             verdict_detail.append("Scenario 2: Ratio > 1 & SPX < EMA200")
         verdict_info = "\n   ".join(verdict_detail)
     else:
-        verdict = "🔴 NO-GO (WAIT)"
+        verdict = "[STOP] NO-GO (WAIT)"
         verdict_info = "Conditions not met"
 
     # Format distance signs
@@ -161,36 +161,36 @@ def format_message(row: pd.Series, signals: dict, distances: dict) -> str:
 
     # Build message
     message = f"""
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 DAILY SIGNAL EXECUTION TRACKER
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+===============================
+[CHART] DAILY SIGNAL EXECUTION TRACKER
+===============================
 
-📅 Date: {row.name.strftime('%Y-%m-%d')}
+[DATE] Date: {row.name.strftime('%Y-%m-%d')}
 
-📈 MARKET LEVELS
+[UP] MARKET LEVELS
    SPX:    {row['SPX']:,.2f}
    VIX:    {row['VIX']:.2f}
    VIX3M:  {row['VIX3M']:.2f}
 
-📐 KEY INDICATORS
+[CALC] KEY INDICATORS
    VIX/VIX3M Ratio:     {row['VIX_VIX3M_Ratio']:.4f}
    Ratio 5d SMA:        {row['Ratio_5d_SMA']:.4f}
    SPX 200d SMA:        {row['SPX_SMA_200']:,.2f}
    SPX 200d EMA:        {row['SPX_EMA_200']:,.2f}
 
-📏 SPX DISTANCE FROM MAs
+[RULER] SPX DISTANCE FROM MAs
    From 200d SMA:  {sma_sign}{distances['distance_from_sma_pct']:.2f}%
    From 200d EMA:  {ema_sign}{distances['distance_from_ema_pct']:.2f}%
 
-🎯 SIGNAL CONDITIONS
-   Ratio 5d SMA > 1.0:  {'✅ YES' if signals['ratio_elevated'] else '❌ NO'}
-   SPX < 200d SMA:      {'✅ YES' if signals['spx_below_sma'] else '❌ NO'}
-   SPX < 200d EMA:      {'✅ YES' if signals['spx_below_ema'] else '❌ NO'}
+[TARGET] SIGNAL CONDITIONS
+   Ratio 5d SMA > 1.0:  {'[YES] YES' if signals['ratio_elevated'] else '[NO] NO'}
+   SPX < 200d SMA:      {'[YES] YES' if signals['spx_below_sma'] else '[NO] NO'}
+   SPX < 200d EMA:      {'[YES] YES' if signals['spx_below_ema'] else '[NO] NO'}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🚦 VERDICT: {verdict}
+===============================
+[SIGNAL] VERDICT: {verdict}
    {verdict_info}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+===============================
 """
     return message.strip()
 
@@ -218,10 +218,10 @@ def send_telegram_message(message: str, bot_token: str, chat_id: str) -> bool:
     try:
         response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
-        print("✅ Telegram message sent successfully!")
+        print("[YES] Telegram message sent successfully!")
         return True
     except requests.exceptions.RequestException as e:
-        print(f"❌ Failed to send Telegram message: {e}")
+        print(f"[NO] Failed to send Telegram message: {e}")
         return False
 
 
@@ -230,20 +230,20 @@ def main():
     print("=" * 50)
     print("DAILY SIGNAL EXECUTION TRACKER")
     print("=" * 50)
-    print(f"\n⏰ Run Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    print(f"\n[TIME] Run Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     # Step 1: Fetch market data
-    print("📥 Fetching market data...")
+    print("[DL] Fetching market data...")
     try:
         df = fetch_market_data(period_days=250)
         print(f"   Retrieved {len(df)} trading days of data")
         print(f"   Date range: {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}")
     except Exception as e:
-        print(f"❌ Failed to fetch data: {e}")
+        print(f"[NO] Failed to fetch data: {e}")
         return
 
     # Step 2: Calculate indicators
-    print("\n📊 Calculating indicators...")
+    print("\n[CHART] Calculating indicators...")
     df = calculate_indicators(df)
 
     # Step 3: Get latest row and evaluate signals
@@ -264,10 +264,10 @@ def main():
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
     if bot_token and chat_id:
-        print("\n📤 Sending to Telegram...")
+        print("\n[SEND] Sending to Telegram...")
         send_telegram_message(message, bot_token, chat_id)
     else:
-        print("\n⚠️  Telegram credentials not found in environment variables.")
+        print("\n[!]  Telegram credentials not found in environment variables.")
         print("   Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable notifications.")
 
 
