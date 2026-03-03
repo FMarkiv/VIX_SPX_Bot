@@ -107,6 +107,50 @@ def evaluate_signals(row: pd.Series) -> dict:
     }
 
 
+def get_regime_context(raw_ratio: float) -> dict:
+    """
+    Map the current raw VIX/VIX3M ratio to historical regime expectations.
+
+    Based on gradient analysis of historical forward returns by ratio bucket.
+
+    Args:
+        raw_ratio: The raw (non-smoothed) VIX/VIX3M ratio
+
+    Returns:
+        Dictionary with regime name and historical expected 252d return
+    """
+    if raw_ratio < 0.85:
+        return {
+            "regime_name": "Deep Contango",
+            "expected_return": 9.5,
+            "description": "Historically sluggish"
+        }
+    elif raw_ratio < 0.90:
+        return {
+            "regime_name": "Mild Contango",
+            "expected_return": 11.5,
+            "description": "Average market conditions"
+        }
+    elif raw_ratio < 0.95:
+        return {
+            "regime_name": "The Sweet Spot",
+            "expected_return": 14.0,
+            "description": "Floor forming"
+        }
+    elif raw_ratio < 1.0:
+        return {
+            "regime_name": "Transition / High Tension",
+            "expected_return": 14.5,
+            "description": "Elevated fear"
+        }
+    else:
+        return {
+            "regime_name": "Backwardation",
+            "expected_return": 20.0,
+            "description": "Panic / Capitulation"
+        }
+
+
 def calculate_distances(row: pd.Series) -> dict:
     """
     Calculate percentage distance of SPX from its moving averages.
@@ -130,7 +174,7 @@ def calculate_distances(row: pd.Series) -> dict:
     }
 
 
-def format_message(row: pd.Series, signals: dict, distances: dict) -> str:
+def format_message(row: pd.Series, signals: dict, distances: dict, regime: dict) -> str:
     """
     Format the output message for Telegram.
 
@@ -138,6 +182,7 @@ def format_message(row: pd.Series, signals: dict, distances: dict) -> str:
         row: Series containing current day's values
         signals: Dictionary with signal evaluation results
         distances: Dictionary with distance percentages
+        regime: Dictionary with historical regime context
 
     Returns:
         Formatted message string
@@ -186,6 +231,10 @@ def format_message(row: pd.Series, signals: dict, distances: dict) -> str:
    Ratio 5d SMA > 1.0:  {'[YES] YES' if signals['ratio_elevated'] else '[NO] NO'}
    SPX < 200d SMA:      {'[YES] YES' if signals['spx_below_sma'] else '[NO] NO'}
    SPX < 200d EMA:      {'[YES] YES' if signals['spx_below_ema'] else '[NO] NO'}
+
+[HISTORY] REGIME EXPECTATIONS
+   Current Regime: {regime['regime_name']}
+   Historical 252d Avg Return: {regime['expected_return']:.1f}%
 
 ===============================
 [SIGNAL] VERDICT: {verdict}
@@ -249,11 +298,12 @@ def main():
     latest = df.iloc[-1]
     signals = evaluate_signals(latest)
     distances = calculate_distances(latest)
+    regime = get_regime_context(latest["VIX_VIX3M_Ratio"])
 
     print(f"   Latest data point: {latest.name.strftime('%Y-%m-%d')}")
 
     # Step 4: Format message
-    message = format_message(latest, signals, distances)
+    message = format_message(latest, signals, distances, regime)
 
     # Print to console
     print("\n" + message)
