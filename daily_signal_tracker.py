@@ -8,32 +8,34 @@ Strategy Logic:
 - BUY SIGNAL when VIX/VIX3M ratio (5d SMA) > 1.0 AND SPX is below its 200d MA
 - This indicates elevated short-term fear relative to medium-term expectations
   combined with a market trading below its long-term trend.
+
+Regime Analysis:
+- Calculates forward returns dynamically from full historical data (~2006+)
+- Divides VIX/VIX3M ratio into 10 deciles with actual historical performance metrics
 """
 
 import os
 from datetime import datetime
 
+import numpy as np
 import requests
 import yfinance as yf
 import pandas as pd
 
 
-def fetch_market_data(period_days: int = 250) -> pd.DataFrame:
+def fetch_market_data_full() -> pd.DataFrame:
     """
-    Download historical data for SPX, VIX, and VIX3M.
-
-    Args:
-        period_days: Number of trading days to fetch (default 250)
+    Download full historical data for SPX, VIX, and VIX3M.
 
     Returns:
         DataFrame with aligned close prices for all three instruments
     """
     tickers = ["^GSPC", "^VIX", "^VIX3M"]
 
-    # Fetch ~18 months to ensure we have 250+ trading days after weekends/holidays
+    # Fetch full history (VIX3M starts around 2007)
     data = yf.download(
         tickers,
-        period="18mo",
+        period="max",
         interval="1d",
         progress=False,
         auto_adjust=True
@@ -43,10 +45,169 @@ def fetch_market_data(period_days: int = 250) -> pd.DataFrame:
     closes = data["Close"].copy()
     closes.columns = ["SPX", "VIX", "VIX3M"]
 
-    # Drop any rows with missing data and take last N days
-    closes = closes.dropna().tail(period_days)
+    # Drop any rows with missing data
+    closes = closes.dropna()
 
     return closes
+
+
+def calculate_forward_returns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate forward returns and risk metrics for SPX.
+
+    Args:
+        df: DataFrame with SPX, VIX, VIX3M columns
+
+    Returns:
+        DataFrame with forward return columns added
+    """
+    data = df.copy()
+
+    # Calculate VIX/VIX3M ratio
+    data["VIX_VIX3M_Ratio"] = data["VIX"] / data["VIX3M"]
+
+    # Forward returns (negative shift = look forward)
+    data["Fwd_21d"] = data["SPX"].pct_change(periods=21).shift(-21) * 100
+    data["Fwd_63d"] = data["SPX"].pct_change(periods=63).shift(-63) * 100
+    data["Fwd_252d"] = data["SPX"].pct_change(periods=252).shift(-252) * 100
+    data["Fwd_504d"] = data["SPX"].pct_change(periods=504).shift(-504) * 100
+
+    # 252-day forward max drawdown
+    # For each day, look at the next 252 days and find the max drawdown
+    max_dd_list = []
+    win_rate_list = []
+
+    spx_values = data["SPX"].values
+
+    for i in range(len(data)):
+        if i + 252 < len(data):
+            future_prices = spx_values[i:i + 253]  # Include starting day
+            start_price = future_prices[0]
+            # Calculate rolling max and drawdowns
+            rolling_max = np.maximum.accumulate(future_prices)
+            drawdowns = (future_prices - rolling_max) / rolling_max * 100
+            max_dd = drawdowns.min()
+            max_dd_list.append(max_dd)
+
+            # Win rate: was 252d return positive?
+            end_price = spx_values[i + 252]
+            win_rate_list.append(1 if end_price > start_price else 0)
+        else:
+            max_dd_list.append(np.nan)
+            win_rate_list.append(np.nan)
+
+    data["Fwd_252d_MaxDD"] = max_dd_list
+    data["Fwd_252d_Win"] = win_rate_list
+
+    return data
+
+
+def create_decile_stats(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Create decile buckets for VIX/VIX3M ratio and calculate statistics.
+
+    Args:
+        df: DataFrame with forward returns already calculated
+
+    Returns:
+        Tuple of (full DataFrame with decile labels, decile statistics DataFrame)
+    """
+    data = df.copy()
+
+    # Filter to rows where we have complete forward return data
+    # Exclude last 504 days where 2Y forward returns are NaN
+    analysis_data = data.dropna(subset=["Fwd_21d", "Fwd_63d", "Fwd_252d", "Fwd_504d",
+                                        "Fwd_252d_MaxDD", "Fwd_252d_Win"])
+
+    # Create deciles based on VIX/VIX3M ratio (1 = lowest ratio, 10 = highest)
+    analysis_data = analysis_data.copy()
+    analysis_data["Decile"] = pd.qcut(
+        analysis_data["VIX_VIX3M_Ratio"],
+        q=10,
+        labels=range(1, 11),
+        duplicates='drop'
+    )
+
+    # Calculate statistics for each decile
+    decile_stats = analysis_data.groupby("Decile").agg({
+        "VIX_VIX3M_Ratio": ["min", "max", "mean"],
+        "Fwd_21d": "mean",
+        "Fwd_63d": "mean",
+        "Fwd_252d": "mean",
+        "Fwd_504d": "mean",
+        "Fwd_252d_MaxDD": "mean",
+        "Fwd_252d_Win": "mean"
+    })
+
+    # Flatten column names
+    decile_stats.columns = [
+        "Ratio_Min", "Ratio_Max", "Ratio_Mean",
+        "Avg_1M_Return", "Avg_3M_Return", "Avg_1Y_Return", "Avg_2Y_Return",
+        "Avg_1Y_MaxDD", "Avg_1Y_WinRate"
+    ]
+
+    # Convert win rate to percentage
+    decile_stats["Avg_1Y_WinRate"] = decile_stats["Avg_1Y_WinRate"] * 100
+
+    return analysis_data, decile_stats
+
+
+def get_regime_context_dynamic(raw_ratio: float, decile_stats: pd.DataFrame) -> dict:
+    """
+    Map the current raw VIX/VIX3M ratio to historical regime expectations.
+
+    Uses dynamically calculated decile statistics from full historical data.
+
+    Args:
+        raw_ratio: The raw (non-smoothed) VIX/VIX3M ratio
+        decile_stats: DataFrame with decile statistics
+
+    Returns:
+        Dictionary with regime metrics
+    """
+    # Find which decile this ratio falls into
+    current_decile = None
+
+    for decile in decile_stats.index:
+        ratio_min = decile_stats.loc[decile, "Ratio_Min"]
+        ratio_max = decile_stats.loc[decile, "Ratio_Max"]
+
+        if ratio_min <= raw_ratio <= ratio_max:
+            current_decile = decile
+            break
+
+    # Handle edge cases (ratio outside historical range)
+    if current_decile is None:
+        if raw_ratio < decile_stats["Ratio_Min"].min():
+            current_decile = 1  # Below historical minimum
+        else:
+            current_decile = 10  # Above historical maximum
+
+    # Map decile to regime name
+    if current_decile <= 2:
+        regime_name = "Deep Contango"
+    elif current_decile <= 4:
+        regime_name = "Mild Contango"
+    elif current_decile <= 7:
+        regime_name = "Normal"
+    elif current_decile <= 9:
+        regime_name = "Transition/Elevated"
+    else:
+        regime_name = "Backwardation/Panic"
+
+    # Get statistics for this decile
+    stats = decile_stats.loc[current_decile]
+
+    return {
+        "decile": int(current_decile),
+        "regime_name": regime_name,
+        "return_1m": stats["Avg_1M_Return"],
+        "return_3m": stats["Avg_3M_Return"],
+        "return_1y": stats["Avg_1Y_Return"],
+        "return_2y": stats["Avg_2Y_Return"],
+        "max_dd_1y": stats["Avg_1Y_MaxDD"],
+        "win_rate_1y": stats["Avg_1Y_WinRate"]
+    }
 
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -107,50 +268,6 @@ def evaluate_signals(row: pd.Series) -> dict:
     }
 
 
-def get_regime_context(raw_ratio: float) -> dict:
-    """
-    Map the current raw VIX/VIX3M ratio to historical regime expectations.
-
-    Based on gradient analysis of historical forward returns by ratio bucket.
-
-    Args:
-        raw_ratio: The raw (non-smoothed) VIX/VIX3M ratio
-
-    Returns:
-        Dictionary with regime name and historical expected 252d return
-    """
-    if raw_ratio < 0.85:
-        return {
-            "regime_name": "Deep Contango",
-            "expected_return": 9.5,
-            "description": "Historically sluggish"
-        }
-    elif raw_ratio < 0.90:
-        return {
-            "regime_name": "Mild Contango",
-            "expected_return": 11.5,
-            "description": "Average market conditions"
-        }
-    elif raw_ratio < 0.95:
-        return {
-            "regime_name": "The Sweet Spot",
-            "expected_return": 14.0,
-            "description": "Floor forming"
-        }
-    elif raw_ratio < 1.0:
-        return {
-            "regime_name": "Transition / High Tension",
-            "expected_return": 14.5,
-            "description": "Elevated fear"
-        }
-    else:
-        return {
-            "regime_name": "Backwardation",
-            "expected_return": 20.0,
-            "description": "Panic / Capitulation"
-        }
-
-
 def calculate_distances(row: pd.Series) -> dict:
     """
     Calculate percentage distance of SPX from its moving averages.
@@ -204,6 +321,12 @@ def format_message(row: pd.Series, signals: dict, distances: dict, regime: dict)
     sma_sign = "+" if distances["distance_from_sma_pct"] >= 0 else ""
     ema_sign = "+" if distances["distance_from_ema_pct"] >= 0 else ""
 
+    # Format return signs
+    r1m_sign = "+" if regime["return_1m"] >= 0 else ""
+    r3m_sign = "+" if regime["return_3m"] >= 0 else ""
+    r1y_sign = "+" if regime["return_1y"] >= 0 else ""
+    r2y_sign = "+" if regime["return_2y"] >= 0 else ""
+
     # Build message
     message = f"""
 ===============================
@@ -232,9 +355,10 @@ def format_message(row: pd.Series, signals: dict, distances: dict, regime: dict)
    SPX < 200d SMA:      {'[YES] YES' if signals['spx_below_sma'] else '[NO] NO'}
    SPX < 200d EMA:      {'[YES] YES' if signals['spx_below_ema'] else '[NO] NO'}
 
-[HISTORY] REGIME EXPECTATIONS
-   Current Regime: {regime['regime_name']}
-   Historical 252d Avg Return: {regime['expected_return']:.1f}%
+[HISTORY] REGIME CONTEXT
+   Current Regime: {regime['regime_name']} (Decile: {regime['decile']}/10)
+   Returns: 1M: {r1m_sign}{regime['return_1m']:.1f}% | 3M: {r3m_sign}{regime['return_3m']:.1f}% | 1Y: {r1y_sign}{regime['return_1y']:.1f}% | 2Y: {r2y_sign}{regime['return_2y']:.1f}%
+   1Y Risk: Max DD: {regime['max_dd_1y']:.1f}% | Win Rate: {regime['win_rate_1y']:.0f}%
 
 ===============================
 [SIGNAL] VERDICT: {verdict}
@@ -280,35 +404,52 @@ def main():
     print("=" * 50)
     print(f"\n[TIME] Run Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
-    # Step 1: Fetch market data
-    print("[DL] Fetching market data...")
+    # Step 1: Fetch full historical market data
+    print("[DL] Fetching full historical market data...")
     try:
-        df = fetch_market_data(period_days=250)
-        print(f"   Retrieved {len(df)} trading days of data")
-        print(f"   Date range: {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}")
+        df_full = fetch_market_data_full()
+        print(f"   Retrieved {len(df_full)} trading days of data")
+        print(f"   Date range: {df_full.index[0].strftime('%Y-%m-%d')} to {df_full.index[-1].strftime('%Y-%m-%d')}")
     except Exception as e:
         print(f"[NO] Failed to fetch data: {e}")
         return
 
-    # Step 2: Calculate indicators
-    print("\n[CHART] Calculating indicators...")
-    df = calculate_indicators(df)
+    # Step 2: Calculate forward returns on full history
+    print("\n[CALC] Calculating forward returns...")
+    df_with_returns = calculate_forward_returns(df_full)
 
-    # Step 3: Get latest row and evaluate signals
-    latest = df.iloc[-1]
+    # Step 3: Create decile statistics
+    print("[BUCKET] Creating decile buckets and statistics...")
+    _, decile_stats = create_decile_stats(df_with_returns)
+
+    print("\n   Decile Statistics Summary:")
+    print(f"   {'Decile':<8} {'Ratio Range':<18} {'1Y Avg Return':<15} {'1Y Win Rate':<12}")
+    print("   " + "-" * 55)
+    for decile in decile_stats.index:
+        row = decile_stats.loc[decile]
+        print(f"   {decile:<8} {row['Ratio_Min']:.3f} - {row['Ratio_Max']:.3f}      "
+              f"{row['Avg_1Y_Return']:>+6.1f}%         {row['Avg_1Y_WinRate']:>5.0f}%")
+
+    # Step 4: Calculate indicators on recent data
+    print("\n[CHART] Calculating current indicators...")
+    df_indicators = calculate_indicators(df_full)
+
+    # Step 5: Get latest row and evaluate signals
+    latest = df_indicators.iloc[-1]
     signals = evaluate_signals(latest)
     distances = calculate_distances(latest)
-    regime = get_regime_context(latest["VIX_VIX3M_Ratio"])
+    regime = get_regime_context_dynamic(latest["VIX_VIX3M_Ratio"], decile_stats)
 
     print(f"   Latest data point: {latest.name.strftime('%Y-%m-%d')}")
+    print(f"   Current ratio: {latest['VIX_VIX3M_Ratio']:.4f} -> Decile {regime['decile']} ({regime['regime_name']})")
 
-    # Step 4: Format message
+    # Step 6: Format message
     message = format_message(latest, signals, distances, regime)
 
     # Print to console
     print("\n" + message)
 
-    # Step 5: Send via Telegram if credentials are available
+    # Step 7: Send via Telegram if credentials are available
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
