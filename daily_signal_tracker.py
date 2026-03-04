@@ -102,7 +102,7 @@ def calculate_forward_returns(df: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
-def create_decile_stats(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def create_decile_stats(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Create decile buckets for VIX/VIX3M ratio and calculate statistics.
 
@@ -110,7 +110,8 @@ def create_decile_stats(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         df: DataFrame with forward returns already calculated
 
     Returns:
-        Tuple of (full DataFrame with decile labels, decile statistics DataFrame)
+        Tuple of (full DataFrame with decile labels, decile statistics DataFrame,
+                  unconditional baseline dictionary)
     """
     data = df.copy()
 
@@ -118,6 +119,16 @@ def create_decile_stats(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     # Exclude last 504 days where 2Y forward returns are NaN
     analysis_data = data.dropna(subset=["Fwd_21d", "Fwd_63d", "Fwd_252d", "Fwd_504d",
                                         "Fwd_252d_MaxDD", "Fwd_252d_Win"])
+
+    # Calculate unconditional baseline (mean across entire dataset)
+    baseline = {
+        "return_1m": analysis_data["Fwd_21d"].mean(),
+        "return_3m": analysis_data["Fwd_63d"].mean(),
+        "return_1y": analysis_data["Fwd_252d"].mean(),
+        "return_2y": analysis_data["Fwd_504d"].mean(),
+        "max_dd_1y": analysis_data["Fwd_252d_MaxDD"].mean(),
+        "win_rate_1y": analysis_data["Fwd_252d_Win"].mean() * 100
+    }
 
     # Create deciles based on VIX/VIX3M ratio (1 = lowest ratio, 10 = highest)
     analysis_data = analysis_data.copy()
@@ -149,7 +160,7 @@ def create_decile_stats(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     # Convert win rate to percentage
     decile_stats["Avg_1Y_WinRate"] = decile_stats["Avg_1Y_WinRate"] * 100
 
-    return analysis_data, decile_stats
+    return analysis_data, decile_stats, baseline
 
 
 def get_regime_context_dynamic(raw_ratio: float, decile_stats: pd.DataFrame) -> dict:
@@ -291,7 +302,7 @@ def calculate_distances(row: pd.Series) -> dict:
     }
 
 
-def format_message(row: pd.Series, signals: dict, distances: dict, regime: dict) -> str:
+def format_message(row: pd.Series, signals: dict, distances: dict, regime: dict, baseline: dict) -> str:
     """
     Format the output message for Telegram.
 
@@ -300,6 +311,7 @@ def format_message(row: pd.Series, signals: dict, distances: dict, regime: dict)
         signals: Dictionary with signal evaluation results
         distances: Dictionary with distance percentages
         regime: Dictionary with historical regime context
+        baseline: Dictionary with unconditional baseline metrics
 
     Returns:
         Formatted message string
@@ -321,11 +333,17 @@ def format_message(row: pd.Series, signals: dict, distances: dict, regime: dict)
     sma_sign = "+" if distances["distance_from_sma_pct"] >= 0 else ""
     ema_sign = "+" if distances["distance_from_ema_pct"] >= 0 else ""
 
-    # Format return signs
+    # Format regime return signs
     r1m_sign = "+" if regime["return_1m"] >= 0 else ""
     r3m_sign = "+" if regime["return_3m"] >= 0 else ""
     r1y_sign = "+" if regime["return_1y"] >= 0 else ""
     r2y_sign = "+" if regime["return_2y"] >= 0 else ""
+
+    # Format baseline return signs
+    b1m_sign = "+" if baseline["return_1m"] >= 0 else ""
+    b3m_sign = "+" if baseline["return_3m"] >= 0 else ""
+    b1y_sign = "+" if baseline["return_1y"] >= 0 else ""
+    b2y_sign = "+" if baseline["return_2y"] >= 0 else ""
 
     # Build message
     message = f"""
@@ -356,9 +374,13 @@ def format_message(row: pd.Series, signals: dict, distances: dict, regime: dict)
    SPX < 200d EMA:      {'[YES] YES' if signals['spx_below_ema'] else '[NO] NO'}
 
 [HISTORY] REGIME CONTEXT
-   Current Regime: {regime['regime_name']} (Decile: {regime['decile']}/10)
-   Returns: 1M: {r1m_sign}{regime['return_1m']:.1f}% | 3M: {r3m_sign}{regime['return_3m']:.1f}% | 1Y: {r1y_sign}{regime['return_1y']:.1f}% | 2Y: {r2y_sign}{regime['return_2y']:.1f}%
-   1Y Risk: Max DD: {regime['max_dd_1y']:.1f}% | Win Rate: {regime['win_rate_1y']:.0f}%
+Current Regime: {regime['regime_name']} (Decile: {regime['decile']}/10)
+   -> Returns: 1M: {r1m_sign}{regime['return_1m']:.1f}% | 3M: {r3m_sign}{regime['return_3m']:.1f}% | 1Y: {r1y_sign}{regime['return_1y']:.1f}% | 2Y: {r2y_sign}{regime['return_2y']:.1f}%
+   -> 1Y Risk: Max DD: {regime['max_dd_1y']:.1f}% | Win Rate: {regime['win_rate_1y']:.0f}%
+
+Baseline (Unconditional Market)
+   -> Returns: 1M: {b1m_sign}{baseline['return_1m']:.1f}% | 3M: {b3m_sign}{baseline['return_3m']:.1f}% | 1Y: {b1y_sign}{baseline['return_1y']:.1f}% | 2Y: {b2y_sign}{baseline['return_2y']:.1f}%
+   -> 1Y Risk: Max DD: {baseline['max_dd_1y']:.1f}% | Win Rate: {baseline['win_rate_1y']:.0f}%
 
 ===============================
 [SIGNAL] VERDICT: {verdict}
@@ -418,9 +440,9 @@ def main():
     print("\n[CALC] Calculating forward returns...")
     df_with_returns = calculate_forward_returns(df_full)
 
-    # Step 3: Create decile statistics
+    # Step 3: Create decile statistics and unconditional baseline
     print("[BUCKET] Creating decile buckets and statistics...")
-    _, decile_stats = create_decile_stats(df_with_returns)
+    _, decile_stats, baseline = create_decile_stats(df_with_returns)
 
     print("\n   Decile Statistics Summary:")
     print(f"   {'Decile':<8} {'Ratio Range':<18} {'1Y Avg Return':<15} {'1Y Win Rate':<12}")
@@ -429,6 +451,11 @@ def main():
         row = decile_stats.loc[decile]
         print(f"   {decile:<8} {row['Ratio_Min']:.3f} - {row['Ratio_Max']:.3f}      "
               f"{row['Avg_1Y_Return']:>+6.1f}%         {row['Avg_1Y_WinRate']:>5.0f}%")
+
+    print("\n   Unconditional Baseline (All Data):")
+    print(f"   1M: {baseline['return_1m']:+.1f}% | 3M: {baseline['return_3m']:+.1f}% | "
+          f"1Y: {baseline['return_1y']:+.1f}% | 2Y: {baseline['return_2y']:+.1f}%")
+    print(f"   1Y Max DD: {baseline['max_dd_1y']:.1f}% | 1Y Win Rate: {baseline['win_rate_1y']:.0f}%")
 
     # Step 4: Calculate indicators on recent data
     print("\n[CHART] Calculating current indicators...")
@@ -444,7 +471,7 @@ def main():
     print(f"   Current ratio: {latest['VIX_VIX3M_Ratio']:.4f} -> Decile {regime['decile']} ({regime['regime_name']})")
 
     # Step 6: Format message
-    message = format_message(latest, signals, distances, regime)
+    message = format_message(latest, signals, distances, regime, baseline)
 
     # Print to console
     print("\n" + message)
