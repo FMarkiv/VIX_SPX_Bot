@@ -2,6 +2,8 @@
 
 A Python-based trading signal system that monitors VIX term structure and SPX trend conditions to identify high-probability entry points.
 
+> **📖 [Full Strategy Documentation](STRATEGY_DOCUMENTATION.md)** - Comprehensive guide covering theory, decile analysis, backtested performance, and risk management.
+
 ## Strategy Overview
 
 The system generates BUY signals based on VIX term structure inversion (backwardation) combined with SPX trend filters:
@@ -24,6 +26,7 @@ The system generates BUY signals based on VIX term structure inversion (backward
 
 | File | Description |
 |------|-------------|
+| `STRATEGY_DOCUMENTATION.md` | **Master documentation** - full strategy guide with decile analysis |
 | `daily_signal_tracker.py` | Main bot - fetches live data and sends Telegram alerts |
 | `trend_filter_matrix_evaluation.py` | Backtesting framework for strategy optimization |
 | `backtest_analysis.py` | Historical performance analysis |
